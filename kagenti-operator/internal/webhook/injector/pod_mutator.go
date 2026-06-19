@@ -596,7 +596,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 				"reverse_proxy_backend": fmt.Sprintf("http://127.0.0.1:%d", newAgentPort),
 				"forward_proxy_addr":    fmt.Sprintf(":%d", forwardProxyPort),
 			},
-			mtlsMode, allowedAudiences, tlsBridgeMode)
+			mtlsMode, allowedAudiences, tlsBridgeMode, spireEnabled)
 		if err != nil {
 			return false, fmt.Errorf("proxy-sidecar per-agent ConfigMap: %w", err)
 		}
@@ -732,7 +732,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	// inbound listener (gated on MTLSEnabled) and UpstreamTlsContext on
 	// original_destination_tls (strict only).
 	perAgentCMName, err := m.ensurePerAgentConfigMap(ctx, namespace, crName,
-		ModeEnvoySidecar, nsConfig.AuthBridgeRuntimeYAML, nsConfig, nil, mtlsMode, allowedAudiences, "") // bridge never runs under envoy-sidecar
+		ModeEnvoySidecar, nsConfig.AuthBridgeRuntimeYAML, nsConfig, nil, mtlsMode, allowedAudiences, "", spireEnabled) // bridge never runs under envoy-sidecar
 	if err != nil {
 		return false, fmt.Errorf("envoy-sidecar per-agent ConfigMap: %w", err)
 	}
@@ -990,6 +990,7 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 	mtlsMode string,
 	allowedAudiences []string,
 	tlsBridgeMode string,
+	spireEnabled bool,
 ) (string, error) {
 	cmName := perAgentConfigMapName(crName)
 
@@ -1072,6 +1073,20 @@ func (m *PodMutator) ensurePerAgentConfigMap(
 		}
 	} else {
 		delete(cfg, "tls_bridge")
+	}
+
+	// SPIFFE provider block. The authbridge binary creates an in-process
+	// spiffe.Provider (Workload API client) only when this block is present
+	// AND a plugin actually needs it (identity.type=spiffe or mTLS). Without
+	// the block, token-exchange in spiffe mode fails at startup with
+	// "spiffe identity requires a SPIFFE provider to be injected".
+	if spireEnabled {
+		spiffeCfg := map[string]interface{}{
+			"socket": m.GetPlatformConfig().Spiffe.SocketPath,
+		}
+		cfg["spiffe"] = spiffeCfg
+	} else {
+		delete(cfg, "spiffe")
 	}
 
 	// Marshal back to YAML
